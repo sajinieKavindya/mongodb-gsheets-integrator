@@ -1,0 +1,9 @@
+target/
+
+# Log file
+*.log
+
+.idea
+
+#conf file
+ballerina.conf
