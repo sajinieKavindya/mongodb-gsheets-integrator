@@ -4,96 +4,80 @@ import ballerina/http;
 import ballerina/log;
 import wso2/mongodb;
 import wso2/gsheets4;
+import wso2/gmail;
 
+
+# MongoDB database name
 string databaseName = config:getAsString("DATABASE_NAME");
+
+# Sender email address.
+string senderEmail = config:getAsString("SENDER");
+
+# The user's email address.
+string dbAdminEmail = config:getAsString("DB_ADMIN_EMAIL");
+
 
 gsheets4:SpreadsheetConfiguration spreadsheetConfig = {
     clientConfig: {
         auth: {
             scheme: http:OAUTH2,
-            accessToken: config:getAsString("ACCESS_TOKEN"),
+            accessToken: config:getAsString("GSHEETS_ACCESS_TOKEN"),
             clientId: config:getAsString("CLIENT_ID"),
             clientSecret: config:getAsString("CLIENT_SECRET"),
-            refreshToken: config:getAsString("REFRESH_TOKEN")
+            refreshToken: config:getAsString("GSHEETS_REFRESH_TOKEN")
         }
     }
 };
 
+gmail:Client gmailClient = new({
+        clientConfig: {
+            auth: {
+                scheme: http:OAUTH2,
+                accessToken: config:getAsString("GMAIL_ACCESS_TOKEN"),
+                clientId: config:getAsString("CLIENT_ID"),
+                clientSecret: config:getAsString("CLIENT_SECRET"),
+                refreshToken: config:getAsString("GMAIL_REFRESH_TOKEN")
+            }
+        }
+    });
+
 mongodb:Client conn = new({
-    host: "localhost",
-    dbName: "testballerina",
-    username: "",
-    password: "",
-    options: { sslEnabled: false, serverSelectionTimeout: 500 }
-});
+        host: "localhost",
+        dbName: "testballerina",
+        username: "",
+        password: "",
+        options: { sslEnabled: false, serverSelectionTimeout: 500 }
+    });
 
 gsheets4:Client spreadsheetClient = new(spreadsheetConfig);
 
 public function main() {
 
-    log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet");
-    boolean success = getMongoDBDataIntoSpreadsheet();
-    if (success) {
-        log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet successfully completed!");
-    } else {
-        log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet failed!");
-    }
-
     log:printDebug("Mongo-Spredsheet integration -> Inserting spreadsheet data to MongoDB collection");
-    success = insertSpreadsheetDataIntoMongoDBCollection();
+    boolean success = insertSpreadsheetDataIntoMongoDBCollection();
     if (success) {
         log:printDebug("Mongo-Spredsheet integration -> Inserting spreadsheet data to MongoDB collection successfully completed!");
     } else {
         log:printDebug("Mongo-Spredsheet integration -> Inserting spreadsheet data to MongoDB collection failed!");
     }
 
-    conn.stop();
-
-}
-
-//update
-function updateSpreadsheetDataInMongoDB() returns boolean {
-    //retrieve details from spreadsheet.
-    var details = getAllEmployeeDetailsFromGSheet();
-
-    if (details is error) {
-        log:printError("Failed to retrieve details from GSheet", err = details);
-        return false;
+    log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet");
+    success = getMongoDBDataIntoSpreadsheet();
+    if (success) {
+        log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet successfully completed!");
     } else {
-        int i = 0;
-        string[] keys;
-        int noOfColumns = 0;
-
-        json docArray = [];
-
-        //Iterate through each sheetdata.
-        foreach var value in details {
-            if (i == 0){
-                keys = value;
-                noOfColumns = value.length();
-            }else {
-                json doc = {};
-
-                int j = 0;
-                while (j < noOfColumns){
-                    doc[keys[j]] = value[j];
-                    j+=1;
-                }
-
-                json updateDoc = {};
-                updateDoc["$set"] = doc;
-
-                json filter = {};
-
-                var ret = conn->update("e", filter, updateDoc, false, true);
-                io:println(ret);
-
-            }
-            i += 1;
-        }
+        log:printDebug("Mongo-Spredsheet integration -> Getting collection data to spreadsheet failed!");
     }
 
-    return true;
+    log:printDebug("Mongo-Spredsheet integration -> Updating collection data");
+    success = updateSpreadsheetDataInMongoDB();
+    if (success) {
+        log:printDebug("Mongo-Spredsheet integration -> Updating collection data successfully completed!");
+    } else {
+        log:printDebug("Mongo-Spredsheet integration -> Updating collection data failed!");
+    }
+
+    conn.stop();
 
 }
 
@@ -130,8 +114,57 @@ function insertSpreadsheetDataIntoMongoDBCollection() returns boolean {
         string collectionName = io:readln("Enter collection name: ");
         var ret = conn->batchInsert(collectionName, docArray);
         handleInsert(ret, "Insert to collection " + collectionName);
+
+        //send Email to DB Admin.
+        string subject = "Security Alert - MongoDB Database";
+        sendMail(subject, getCustomEmailTemplate(collectionName, "INSERT"));
     }
     return true;
+}
+
+
+function updateSpreadsheetDataInMongoDB() returns boolean {
+    //retrieve details from spreadsheet.
+    var details = getAllEmployeeDetailsFromGSheet();
+
+    if (details is error) {
+        log:printError("Failed to retrieve details from GSheet", err = details);
+        return false;
+    } else {
+        int i = 0;
+        int noOfColumns = 0;
+        string[] keys;
+        string collectionName = io:readln("Enter collection name: ");
+        json docArray = [];
+
+        //Iterate through each sheetdata.
+        foreach var value in details {
+            if (i == 0){
+                keys = value;
+                noOfColumns = value.length();
+            }else {
+                json doc = {};
+                int j = 0;
+                while (j < noOfColumns){
+                    doc[keys[j]] = value[j];
+                    j+=1;
+                }
+                json filter = {"id": value[0]};
+                json updateDoc = {};
+                updateDoc["$set"] = doc;
+
+                var ret = conn->update(collectionName, filter, updateDoc, false, true);
+                handleUpdate(ret, "row(s) updated in collection " + collectionName);
+            }
+            i += 1;
+        }
+
+        //send Email to DB Admin.
+        string subject = "Security Alert - MongoDB Database";
+        sendMail(subject, getCustomEmailTemplate(collectionName, "UPDATE"));
+    }
+    return true;
+
 }
 
 function getMongoDBDataIntoSpreadsheet() returns boolean {
@@ -186,38 +219,44 @@ function getMongoDBDataIntoSpreadsheet() returns boolean {
             continue;
         }
 
-        newSpreadsheetId = untaint spreadsheet.spreadsheetId;
-        isSuccess = setGSheetValues(newSpreadsheetId, newSheetName);
+        newSpreadsheetId = spreadsheet.spreadsheetId;
+        string collectionName = io:readln("Enter collection name: ");
+        var data = getDataFromMongoDB(collectionName);
+
+        if(data is error) {
+            log:printError("Failed to retrieve details from GSheet", err = data);
+            return false;
+        }else {
+            isSuccess = setGSheetValues(untaint newSpreadsheetId, newSheetName, data);
+        }
+
+        //send Email to DB Admin.
+        string subject = "Security Alert - MongoDB Database";
+        sendMail(subject, getCustomEmailTemplate(collectionName, "READ"));
         break;
     }
     return isSuccess;
 }
 
-function setGSheetValues(@sensitive string spreadsheetId, string sheetName ) returns boolean{
-    var data = getDataFromMongoDB();
 
-    if(data is error) {
-        log:printError("Failed to retrieve details from GSheet", err = data);
+function setGSheetValues(@sensitive string spreadsheetId, string sheetName, string[][] data) returns boolean{
+
+    var isSuccess = spreadsheetClient->setSheetValues(untaint spreadsheetId, sheetName, topLeftCell="", bottomRightCell="", data);
+    if (isSuccess is error) {
+        log:printError("Failed to set values in GSheet", err = isSuccess);
         return false;
-    }else {
-        var isSuccess = spreadsheetClient->setSheetValues(untaint spreadsheetId, sheetName, topLeftCell="", bottomRightCell="", data);
-        if (isSuccess is error) {
-            log:printError("Failed to set values in GSheet", err = isSuccess);
+    } else {
+        boolean b = isSuccess;
+        if (!b) {
+            log:printDebug("Failed to set values in GSheet");
             return false;
-        } else {
-            boolean b = isSuccess;
-            if (!b) {
-                log:printDebug("Failed to set values in GSheet");
-                return false;
-            }
         }
     }
     return true;
 }
 
-function getDataFromMongoDB() returns string[][]|error {
+function getDataFromMongoDB(string collectionName) returns string[][]|error {
     //retrieve data from mongoDB
-    string collectionName = io:readln("Enter collection name: ");
     string[][] data = [];
 
     var jsonRet = conn->find(collectionName, ());
@@ -258,6 +297,7 @@ function getDataFromMongoDB() returns string[][]|error {
     return data;
 }
 
+
 function getAllEmployeeDetailsFromGSheet() returns string[][]|error {
     //Read all the values from the sheet.
     string spreadsheetId = io:readln("Enter spreadsheet ID: ");
@@ -296,6 +336,46 @@ function handleFind(json|error returned) {
         io:println(io:sprintf("%s", returned));
     } else {
         io:println("find failed: " + returned.reason());
+    }
+}
+
+function handleUpdate(int|error returned, string message){
+    if (returned is int) {
+        io:println(returned + message);
+    } else {
+        io:println("update failed: " + returned.reason());
+    }
+}
+
+function getCustomEmailTemplate(string collectionName, string operation) returns string {
+    string emailTemplate = "";
+    emailTemplate = emailTemplate + "<p> Some modifications have been made to "+ databaseName +"database.</p>";
+    emailTemplate = emailTemplate + "<p> Collection Name : "+ collectionName+" </p> ";
+    emailTemplate = emailTemplate + "<p> Action : "+ operation+" </p> ";
+    return emailTemplate;
+}
+
+function sendMail(string subject, string messageBody) {
+    //Create html message
+    gmail:MessageRequest messageRequest = {};
+    messageRequest.recipient = dbAdminEmail;
+    messageRequest.sender = senderEmail;
+    messageRequest.subject = subject;
+    messageRequest.messageBody = messageBody;
+    messageRequest.contentType = gmail:TEXT_HTML;
+
+    //Send mail
+    io:println("sending mail");
+    var sendMessageResponse = gmailClient->sendMessage(senderEmail, untaint messageRequest);
+    io:println(sendMessageResponse);
+    string messageId;
+    string threadId;
+    if (sendMessageResponse is (string, string)) {
+        (messageId, threadId) = sendMessageResponse;
+        log:printInfo("Sent email to " + dbAdminEmail + " with message Id: " + messageId +
+                " and thread Id:" + threadId);
+    } else {
+        log:printInfo(<string>sendMessageResponse.detail().message);
     }
 }
 
