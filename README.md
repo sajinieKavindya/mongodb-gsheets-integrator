@@ -39,3 +39,11 @@ DATABASE_NAME="MongoDB database name"
 SENDER="sender's email"
 DB_ADMIN_EMAIL="email of the database admin"
 ```
+`ballerina.conf` file should be included under home folder for the project as follows.
+
+```
+mongodb-gsheets-integrator
+  ├── ballerina.conf  
+  └── mongo-gsheet
+      └── mongoGSheetsIntegrator.bal
+```
